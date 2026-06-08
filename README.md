@@ -1,13 +1,15 @@
 <div align="center">
+  <img src="https://capsule-render.vercel.app/api?type=waving&color=0:0d1117,50:0a1f0a,100:0d2b0d&height=130&section=header&text=distributed-kv-store&fontSize=36&fontColor=e6edf3&animation=fadeIn&fontAlignY=55" />
+</div>
 
-# Distributed KV Store — Consistent Hashing + Gossip + Replication
+<div align="center">
 
-**A Dynamo‑style distributed key‑value store built from scratch in Java**  
-HTTP API · Replication factor 2 · Node membership via gossip
+[![Java](https://img.shields.io/badge/Java-17-ED8B00?style=flat&logo=openjdk&logoColor=white)](https://java.com)
+[![License](https://img.shields.io/badge/License-MIT-3fb950?style=flat)](LICENSE)
+[![Docker](https://img.shields.io/badge/Docker-3--node%20cluster-2496ED?style=flat&logo=docker&logoColor=white)]()
 
-[![Java](https://img.shields.io/badge/Java-17-red?style=flat-square&logo=java)](https://java.com)
-[![License](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)
-[![Status](https://img.shields.io/badge/Status-Senior%20Portfolio-green?style=flat-square)]()
+**Dynamo-style distributed key-value store in Java.**  
+Consistent hashing · Gossip membership · Replication factor 2 · HTTP API · Disk persistence
 
 </div>
 
@@ -15,99 +17,127 @@ HTTP API · Replication factor 2 · Node membership via gossip
 
 ## Overview
 
-This project is a **distributed, fault‑tolerant key‑value store** inspired by Amazon Dynamo. It partitions data using **consistent hashing**, replicates writes to `N` nodes (default 2), and maintains a cluster membership list via a **gossip protocol**. All operations are exposed through a simple HTTP API. The system handles node joins, failures, and provides eventual consistency (no quorum to keep it simple but extensible).
+A distributed, fault-tolerant key-value store inspired by Amazon Dynamo. Data is partitioned across nodes using a **consistent hash ring** with virtual nodes. Writes are replicated to the primary node and one replica. Cluster membership is maintained via a **gossip protocol** over UDP — nodes discover each other, detect failures, and update the ring without a central coordinator.
+
+All operations are exposed through a simple HTTP API. If a request arrives at the wrong node, it is transparently redirected to the correct coordinator.
+
+---
+
+## Architecture
+
+```
+┌─────────────┐    ┌─────────────┐    ┌─────────────┐
+│   Node 1    │◄──►│   Node 2    │◄──►│   Node 3    │
+│ HTTP :8081  │    │ HTTP :8082  │    │ HTTP :8083  │
+│ Gossip:9091 │    │ Gossip:9092 │    │ Gossip:9093 │
+└──────┬──────┘    └──────┬──────┘    └──────┬──────┘
+       └──────────────────┴──────────────────┘
+                   Consistent Hash Ring
+```
+
+Each node runs three components independently:
+
+- **Jetty** — HTTP API server
+- **Gossip** — UDP heartbeat listener and sender
+- **Local store** — `ConcurrentHashMap` backed by disk persistence
 
 ---
 
 ## Features
 
-- **Consistent hash ring** – partition data across nodes; supports virtual nodes for load balancing.
-- **Gossip membership** – nodes discover each other using UDP heartbeats; failure detection.
-- **Replication** – each key is stored on the primary node + one replica (factor configurable).
-- **HTTP REST API** – `GET /kv/{key}`, `PUT /kv/{key}`, `DELETE /kv/{key}`.
-- **Redirect on miss** – if a request arrives at the wrong node, it redirects to the coordinator.
-- **Disk persistence** – each node stores its partition locally.
-- **Docker Compose** – spin up a 3‑node cluster in seconds.
+| Feature | Details |
+|---|---|
+| **Consistent hash ring** | Virtual nodes for even load distribution; ring updated on gossip membership changes |
+| **Gossip membership** | UDP heartbeats; nodes mark peers as failed after missed intervals |
+| **Replication** | Each key stored on primary + one replica (factor configurable in `Replicator`) |
+| **Transparent redirect** | Request at wrong node returns HTTP 307 to the correct coordinator |
+| **Disk persistence** | Each partition serialized to local disk; survives node restart |
+| **Docker Compose** | 3-node cluster with a single command |
 
 ---
 
 ## Quick Start
 
-### Build
+### Docker Compose (3-node cluster)
+
+```bash
+docker-compose up --build
+```
+
+### From source
+
 ```bash
 mvn clean package
-Run a single node (for testing)
-bash
-java -jar target/distributed-kv-1.0-SNAPSHOT.jar node1 localhost 8080 9090 node2:8080,node3:8080
-Run with Docker Compose (3‑node cluster)
-bash
-docker-compose up --build
-Interact with the cluster
-bash
-# Put a value (goes to primary + replica)
-curl -X PUT http://localhost:8081/kv/foo -d "bar"
 
-# Get the value (may redirect if wrong node)
-curl http://localhost:8081/kv/foo
+# Node 1
+java -jar target/distributed-kv-1.0-SNAPSHOT.jar \
+  node1 localhost 8081 9091 node2:8082,node3:8083
 
-# Delete
-curl -X DELETE http://localhost:8081/kv/foo
-Architecture
-text
-┌─────────────┐    ┌─────────────┐    ┌─────────────┐
-│   Node 1    │    │   Node 2    │    │   Node 3    │
-│ HTTP :8081  │◄──►│ HTTP :8082  │◄──►│ HTTP :8083  │
-│ Gossip:9091 │    │ Gossip:9092 │    │ Gossip:9093 │
-└─────────────┘    └─────────────┘    └─────────────┘
-      │                   │                   │
-      └───────────────────┼───────────────────┘
-                    Consistent Hash Ring
-Each node runs:
+# Node 2 (separate terminal)
+java -jar target/distributed-kv-1.0-SNAPSHOT.jar \
+  node2 localhost 8082 9092 node1:8081,node3:8083
+```
 
-Jetty for HTTP API
+---
 
-Gossip (UDP) for membership
+## API
 
-Local store (ConcurrentHashMap + disk persistence)
+### Write a value
 
-Hash ring (updated via gossip alive nodes)
+```bash
+curl -X PUT http://localhost:8081/kv/my-key -d "my-value"
+```
 
-Configuration
-Edit NodeConfig or pass arguments:
+The request routes to the coordinator for `my-key` on the hash ring. The coordinator writes locally and replicates to one additional node.
 
-nodeId – unique identifier (e.g. node1)
+### Read a value
 
-host – IP or hostname
+```bash
+curl http://localhost:8081/kv/my-key
+```
 
-httpPort – API port
+If `my-key` does not belong to this node, the response is an HTTP 307 redirect to the correct node.
 
-gossipPort – UDP port for gossip
+### Delete a key
 
-seedNodes – comma‑separated list of initial nodes (format host:port)
+```bash
+curl -X DELETE http://localhost:8081/kv/my-key
+```
 
-Replication factor is hardcoded to 2 (can be changed in Replicator).
+---
 
-Limitations & Future Work
-No quorum writes – writes always succeed even if replicas are down (simplified).
+## Configuration
 
-No conflict resolution – last write wins (LWW) for simplicity.
+Arguments at startup:
 
-No data rebalancing on node join/leave (you would need to move keys). Left as an exercise.
+| Argument | Description |
+|---|---|
+| `nodeId` | Unique identifier (e.g. `node1`) |
+| `host` | IP or hostname for this node |
+| `httpPort` | HTTP API port |
+| `gossipPort` | UDP gossip port |
+| `seedNodes` | Comma-separated `host:port` list of initial peers |
 
-Single‑threaded per node – Jetty handles concurrency, but store uses ConcurrentHashMap which is fine.
+Replication factor is set in `Replicator.java` (default: 2).
 
-Why This Is a Senior Portfolio Project
-Implements two distributed algorithms (consistent hashing + gossip)
+---
 
-Uses raw sockets, concurrency, HTTP server programming
+## Consistency model
 
-Demonstrates understanding of eventual consistency, replication, failure detection
+This implementation uses **eventual consistency** — no quorum. Writes always succeed even if replicas are temporarily unreachable. Conflicts use last-write-wins (wall clock). This matches the Dynamo paper's simplified availability-first approach.
 
-Entirely from scratch – no external dependency for distribution logic (only Jetty, Jackson, Quartz)
+For stronger guarantees, replace the replication path with a quorum write (W + R > N).
 
-Ready to scale horizontally
+---
 
-License
-MIT
+## Limitations
 
-</div> ```
+- **No key rebalancing on join/leave** — adding or removing a node does not migrate existing keys. Keys on the old ring segments are unreachable until the node returns.
+- **No conflict resolution beyond LWW** — vector clocks or a merge function would be needed for richer semantics.
+- **No authentication** — suitable for trusted internal networks only.
+
+---
+
+<div align="center">
+  <img src="https://capsule-render.vercel.app/api?type=waving&color=0:0d2b0d,50:0a1f0a,100:0d1117&height=80&section=footer" />
+</div>
